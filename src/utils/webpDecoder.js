@@ -20,6 +20,8 @@ export class WebPPlayer {
     this.frameDuration = 0; // 单帧时长(ms)
     this.repeatedTimes = 0; // 循环次数 (0 = 无限)
     this.renderedCount = 0;
+    this.scaleMode = false;  // 是否降分辨率（流畅模式）
+    this.maxPixels = 1000 * 1400; // 流畅模式目标像素上限（约 140 万像素）
 
     this._rafId = null;
     this._lastTime = 0;
@@ -59,9 +61,14 @@ export class WebPPlayer {
       this.currentFrame = 0;
       this.renderedCount = 0;
 
+      // 计算渲染尺寸（支持降分辨率）
+      this.srcWidth = info.width;
+      this.srcHeight = info.height;
+      this.setScaleMode(this.scaleMode);
+
       // 设置 canvas 尺寸
-      this.canvas.width = info.width;
-      this.canvas.height = info.height;
+      this.canvas.width = this.renderWidth;
+      this.canvas.height = this.renderHeight;
 
       // 解码第一帧立即显示
       await this.decodeAndDraw(0);
@@ -100,6 +107,28 @@ export class WebPPlayer {
     };
     decoder.close();
     return info;
+  }
+
+  /**
+   * 设置是否降分辨率（流畅模式）
+   * @param {boolean} enabled
+   */
+  setScaleMode(enabled) {
+    this.scaleMode = !!enabled;
+    if (!this.srcWidth) return;
+    if (this.scaleMode) {
+      // 计算缩放：保持比例，使总像素不超过 maxPixels
+      const total = this.srcWidth * this.srcHeight;
+      const scale = Math.min(1, Math.sqrt(this.maxPixels / total));
+      this.renderWidth = Math.max(1, Math.round(this.srcWidth * scale));
+      this.renderHeight = Math.max(1, Math.round(this.srcHeight * scale));
+    } else {
+      this.renderWidth = this.srcWidth;
+      this.renderHeight = this.srcHeight;
+    }
+    // 更新 canvas 尺寸
+    this.canvas.width = this.renderWidth;
+    this.canvas.height = this.renderHeight;
   }
 
   /* ==================== 播放控制 ==================== */
@@ -278,15 +307,14 @@ export class WebPPlayer {
 
   _drawFrame(image) {
     if (!image || !image.displayWidth) return;
-    // 使用与 canvas 同尺寸绘制，处理显示尺寸与实际尺寸
-    const dw = image.displayWidth;
-    const dh = image.displayHeight;
-    if (dw !== this.canvas.width || dh !== this.canvas.height) {
-      // 重置画布尺寸以匹配显示尺寸
-    }
+    // 使用与 canvas 同尺寸绘制（支持缩放：从原尺寸缩放到 renderWidth/Height）
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    // 使用 ImageBitmapRenderingContext 兼容或普通 drawImage
-    this.ctx.drawImage(image, 0, 0);
+    // 缩放绘制：若开启流畅模式或尺寸不同，则缩放绘制到画布
+    this.ctx.drawImage(
+      image,
+      0, 0, image.displayWidth, image.displayHeight,
+      0, 0, this.canvas.width, this.canvas.height
+    );
   }
 
   destroy() {

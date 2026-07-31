@@ -20,10 +20,13 @@ import { getCachedThumb, releaseThumb } from '../utils/thumbnailGenerator';
  */
 const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
   const imgRef = useRef(null);
+  const canvasRef = useRef(null);
+  const playerInstRef = useRef(null); // WebPPlayer 实例
   const pauseThumbUrlRef = useRef(null); // 跟踪暂停图 blob URL，便于释放
   const [isPlaying, setIsPlaying] = useState(true);
   const [paused, setPaused] = useState(false);
   const [pauseThumb, setPauseThumb] = useState(null);
+  const [smoothMode, setSmoothMode] = useState(false); // 流畅模式（降分辨率）
   const [info, setInfo] = useState(null);        // 尺寸信息
   const [isAnimation, setIsAnimation] = useState(null); // null=检测中, true/false
   const [fileMeta, setFileMeta] = useState(null);
@@ -39,9 +42,43 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
     }
   };
 
+  // 停止并销毁 canvas 播放器实例
+  const stopCanvasPlayer = () => {
+    if (playerInstRef.current) {
+      playerInstRef.current.destroy();
+      playerInstRef.current = null;
+    }
+  };
+
+  // 用 WebPPlayer 在 canvas 上降分辨率播放
+  const startCanvasPlayer = async (arrayBuffer, scaleMode) => {
+    if (cancelledRef.current) return;
+    stopCanvasPlayer();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    try {
+      const inst = new WebPPlayer(canvas, {
+        onPlayStateChange: (playing) => {
+          if (!cancelledRef.current) {
+            setPaused(!playing);
+            setIsPlaying(playing);
+          }
+        },
+      });
+      inst.setScaleMode(scaleMode);
+      playerInstRef.current = inst;
+      await inst.load(arrayBuffer);
+    } catch (err) {
+      console.error('[Player] canvas 播放失败:', err);
+    }
+  };
+
+  // 取消标记（ref 形式，供异步回调共享）
+  const cancelledRef = useRef(false);
+
   // 加载文件（读取二进制 -> 生成 blob URL）
   useEffect(() => {
-    let cancelled = false;
+    cancelledRef.current = false;
     let objectUrl = null;
     setLoadError(null);
     setInfo(null);
@@ -54,15 +91,16 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
 
     async function load() {
       if (!file) return;
+      const cancelled = () => cancelledRef.current;
 
       // 文件信息（File 对象自带 name/size）
-      if (!cancelled) setFileMeta({ name: file.name, size: file.size });
+      if (!cancelled()) setFileMeta({ name: file.name, size: file.size });
 
       // 大文件提示：十几 MB 的高分辨率动画 WebP 在移动端解码较重
       if (file.size > 8 * 1024 * 1024) {
-        if (!cancelled) setLoadWarn(true);
+        if (!cancelled()) setLoadWarn(true);
       } else {
-        if (!cancelled) setLoadWarn(false);
+        if (!cancelled()) setLoadWarn(false);
       }
 
       try {
@@ -74,44 +112,60 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
         if (hasImageDecoder()) {
           try {
             const probeInfo = await WebPPlayer.probe(buf.buffer);
-            if (!cancelled) {
+            if (!cancelled()) {
               setInfo(probeInfo);
               setIsAnimation(probeInfo.isAnimation);
             }
             console.log('[Player-load] 探测成功', JSON.stringify(probeInfo));
           } catch (err) {
-            if (!cancelled) console.error('[Player] 探测信息失败:', err);
+            if (!cancelled()) console.error('[Player] 探测信息失败:', err);
           }
-          if (cancelled) return;
+          if (cancelled()) return;
         } else {
           // 无 ImageDecoder：无法探测，默认按动画处理（<img> 自动播放）
-          if (!cancelled) setIsAnimation(true);
+          if (!cancelled()) setIsAnimation(true);
         }
 
-        // 生成 blob URL 用于 <img> 加载
-        const blob = new Blob([buf.buffer], { type: 'image/webp' });
-        objectUrl = URL.createObjectURL(blob);
-        if (!cancelled) setImgSrc(objectUrl);
-        console.log('[Player-load] blob URL 生成:', objectUrl);
+        if (smoothMode) {
+          // 流畅模式：用 canvas + WebPPlayer 降分辨率播放
+          // canvas 由渲染逻辑决定是否显示；若未挂载，则等渲染后的 effect 启动
+          if (canvasRef.current) {
+            await startCanvasPlayer(buf.buffer, smoothMode);
+          }
+        } else {
+          // 原始模式：生成 blob URL 用于 <img> 加载（浏览器原生解码）
+          const blob = new Blob([buf.buffer], { type: 'image/webp' });
+          objectUrl = URL.createObjectURL(blob);
+          if (!cancelled()) setImgSrc(objectUrl);
+          console.log('[Player-load] blob URL 生成:', objectUrl);
+        }
       } catch (err) {
-        if (!cancelled) setLoadError(err.message || '读取文件失败');
+        if (!cancelled()) setLoadError(err.message || '读取文件失败');
       }
     }
 
     load();
 
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
+      stopCanvasPlayer();
       revokePauseThumb();
       // 释放该文件的缩略图缓存（回收内存）
       releaseThumb(file);
     };
-  }, [file]);
+  }, [file, smoothMode]);
 
   // 播放/暂停（原生 <img> 无法暂停动画，用静态首帧图盖住模拟暂停）
   const handleTogglePlay = () => {
     if (!isAnimation) return;
+    // 流畅模式：直接用 WebPPlayer 实例控制暂停/播放
+    if (smoothMode) {
+      if (playerInstRef.current) {
+        playerInstRef.current.toggle();
+      }
+      return;
+    }
     const img = imgRef.current;
     if (paused) {
       if (img) img.style.visibility = 'visible';
@@ -184,6 +238,16 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
             ⏭
           </button>
         </div>
+        {/* 流畅模式切换：大文件卡顿时降分辨率播放 */}
+        <div className="smooth-toggle">
+          <button
+            className={`smooth-btn ${smoothMode ? 'active' : ''}`}
+            onClick={() => setSmoothMode((m) => !m)}
+            title="流畅模式：降低播放分辨率，缓解大文件卡顿"
+          >
+            {smoothMode ? '🔉 流畅' : '🔊 原画'}
+          </button>
+        </div>
       </div>
 
       {/* 显示区域 */}
@@ -203,8 +267,15 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
 
         {!file && <div className="empty-state"><p>请选择图片</p></div>}
 
-        {/* 主图：blob URL + 浏览器原生播放动画 WebP */}
-        {file && imgSrc && (
+        {/* 流畅模式：canvas 降分辨率播放 */}
+        {file && smoothMode && (
+          <div className="player-img-wrap" key={fileName}>
+            <canvas ref={canvasRef} className="player-canvas" />
+          </div>
+        )}
+
+        {/* 原始模式：blob URL + 浏览器原生播放动画 WebP */}
+        {file && !smoothMode && imgSrc && (
           <div className="player-img-wrap" key={fileName}>
             <img
               key={`main-${fileName}`}
@@ -229,7 +300,7 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
         )}
 
         {/* 加载中占位 */}
-        {file && !imgSrc && !loadError && (
+        {file && !smoothMode && !imgSrc && !loadError && (
           <div className="empty-state"><p>加载中...</p></div>
         )}
       </div>
