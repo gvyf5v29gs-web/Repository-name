@@ -42,6 +42,7 @@ export class WebPPlayer {
     this.buffer = arrayBuffer;
 
     try {
+      // 分两步创建解码器：先读原始尺寸，若开启缩放且过大，用 desiredWidth/Height 重新创建以直接解码低分辨率
       this.decoder = new ImageDecoder({ data: arrayBuffer, type: 'image/webp' });
       await this.decoder.tracks.ready;
       this.track = this.decoder.tracks.selectedTrack;
@@ -65,6 +66,19 @@ export class WebPPlayer {
       this.srcWidth = info.width;
       this.srcHeight = info.height;
       this.setScaleMode(this.scaleMode);
+
+      // 若开启降分辨率且原始尺寸明显大于渲染尺寸，重新创建低分辨率解码器（省内存/加速）
+      if (this.scaleMode && (this.renderWidth < info.width || this.renderHeight < info.height)) {
+        const old = this.decoder;
+        this.decoder = new ImageDecoder({
+          data: arrayBuffer,
+          type: 'image/webp',
+          desiredWidth: this.renderWidth,
+          desiredHeight: this.renderHeight,
+        });
+        try { await this.decoder.tracks.ready; } catch (e) { console.warn('[WebPPlayer] 低分辨率解码器创建失败，沿用原解码器', e); this.decoder = old; }
+        this.track = this.decoder.tracks.selectedTrack;
+      }
 
       // 设置 canvas 尺寸
       this.canvas.width = this.renderWidth;
@@ -308,34 +322,42 @@ export class WebPPlayer {
 
   async _drawFrame(image) {
     if (!image) return;
-    // 兼容 VideoFrame：displayWidth 在部分 iOS 可能为 undefined，用 codedWidth 兜底
     const sw = image.displayWidth || image.codedWidth || image.width;
     const sh = image.displayHeight || image.codedHeight || image.height;
     if (!sw || !sh) return;
 
-    // 优先用 createImageBitmap 提高跨浏览器兼容性；失败则直接 drawImage
-    let bitmap = null;
-    try {
-      if (typeof createImageBitmap === 'function' && image instanceof ImageBitmap === false) {
-        bitmap = await createImageBitmap(image);
+    // 方案1（首选）：createImageBitmap 转位图再缩放绘制（自动处理尺寸，跨浏览器最稳）
+    let rendered = false;
+    if (typeof createImageBitmap === 'function' && !(image instanceof ImageBitmap)) {
+      try {
+        const bitmap = await createImageBitmap(image);
+        const bw = bitmap.width;
+        const bh = bitmap.height;
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.drawImage(
+          bitmap, 0, 0, bw, bh,
+          0, 0, this.canvas.width, this.canvas.height
+        );
+        bitmap.close();
+        rendered = true;
+      } catch (e) {
+        rendered = false;
+        console.warn('[WebPPlayer] createImageBitmap 失败，回退 drawImage:', e);
       }
-    } catch (e) {
-      bitmap = null;
     }
 
-    const source = bitmap || image;
-    const srcW = bitmap ? bitmap.width : sw;
-    const srcH = bitmap ? bitmap.height : sh;
-
-    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    // 缩放绘制到画布（流畅模式降分辨率）
-    this.ctx.drawImage(
-      source,
-      0, 0, srcW, srcH,
-      0, 0, this.canvas.width, this.canvas.height
-    );
-
-    if (bitmap) bitmap.close();
+    // 方案2（回退）：直接 drawImage(VideoFrame)
+    if (!rendered) {
+      try {
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.drawImage(
+          image, 0, 0, sw, sh,
+          0, 0, this.canvas.width, this.canvas.height
+        );
+      } catch (e2) {
+        console.error('[WebPPlayer] drawImage(VideoFrame) 失败:', e2);
+      }
+    }
   }
 
   destroy() {

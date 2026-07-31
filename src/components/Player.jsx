@@ -55,6 +55,11 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
     stopCanvasPlayer();
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    // 初始化 canvas 尺寸为默认显示区域，避免黑屏
+    canvas.width = 1;
+    canvas.height = 1;
+
     try {
       const inst = new WebPPlayer(canvas, {
         onPlayStateChange: (playing) => {
@@ -66,9 +71,20 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
       });
       inst.setScaleMode(scaleMode);
       playerInstRef.current = inst;
-      await inst.load(arrayBuffer);
+      const info = await inst.load(arrayBuffer);
+      if (cancelledRef.current) return;
+      // 加载成功后确保 canvas 有正确尺寸
+      if (info) {
+        setInfo(info);
+        setIsAnimation(info.isAnimation);
+      }
     } catch (err) {
       console.error('[Player] canvas 播放失败:', err);
+      if (!cancelledRef.current) {
+        // canvas 播放失败：自动回退到原画模式（<img>），保证用户始终能看到图片而非黑屏
+        setSmoothMode(false);
+        setLoadError('流畅模式不可用，已回退到原画模式');
+      }
     }
   };
 
