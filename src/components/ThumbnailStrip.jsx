@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { generateStaticImage, hasImageDecoder } from '../utils/iosCompat';
+import { getCachedThumb, releaseThumb } from '../utils/thumbnailGenerator';
 
 const ITEM_WIDTH = 72;   // 缩略图宽度
 const ITEM_GAP = 8;      // 间距 (对应 CSS margin-right)
@@ -23,9 +24,13 @@ function ThumbCell({ file, active, index, onClick }) {
 
     async function loadThumb() {
       try {
-        const buf = new Uint8Array(await file.arrayBuffer());
-        if (cancelled) return;
-        objectUrl = await generateStaticImage(buf.buffer, 128);
+        // 优先使用带缓存的缩略图获取（同一文件不重复解码）
+        if (hasImageDecoder()) {
+          objectUrl = await getCachedThumb(file, 128);
+        } else {
+          const buf = new Uint8Array(await file.arrayBuffer());
+          objectUrl = await generateStaticImage(buf.buffer, 128);
+        }
         if (!cancelled) {
           setSrc(objectUrl);
           setLoading(false);
@@ -40,7 +45,8 @@ function ThumbCell({ file, active, index, onClick }) {
 
     return () => {
       cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      // 组件卸载时释放该文件的缩略图缓存（回收内存）
+      releaseThumb(file);
     };
   }, [file]);
 

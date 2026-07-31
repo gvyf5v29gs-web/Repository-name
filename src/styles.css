@@ -300,6 +300,23 @@ body {
   font-size: 14px;
 }
 
+.load-warn {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 90%;
+  background: rgba(255, 180, 0, 0.15);
+  border: 1px solid rgba(255, 180, 0, 0.4);
+  color: #ffc94d;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  text-align: center;
+  z-index: 5;
+  pointer-events: none;
+}
+
 .err-msg {
   color: var(--text-dim);
   font-size: 13px;

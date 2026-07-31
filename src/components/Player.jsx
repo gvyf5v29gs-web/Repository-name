@@ -4,6 +4,7 @@ import React, {
 } from 'react';
 import { WebPPlayer } from '../utils/webpDecoder';
 import { generateStaticImage, hasImageDecoder } from '../utils/iosCompat';
+import { getCachedThumb, releaseThumb } from '../utils/thumbnailGenerator';
 
 /**
  * 主播放区：使用 blob: URL 加载 WebP，保证切换图片绝对可靠
@@ -26,6 +27,7 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
   const [isAnimation, setIsAnimation] = useState(null); // null=检测中, true/false
   const [fileMeta, setFileMeta] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [loadWarn, setLoadWarn] = useState(false); // 大文件警告
   const [imgSrc, setImgSrc] = useState(null);    // blob URL
 
   // 加载文件（读取二进制 -> 生成 blob URL）
@@ -45,6 +47,13 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
 
       // 文件信息（File 对象自带 name/size）
       if (!cancelled) setFileMeta({ name: file.name, size: file.size });
+
+      // 大文件提示：十几 MB 的高分辨率动画 WebP 在移动端解码较重
+      if (file.size > 8 * 1024 * 1024) {
+        if (!cancelled) setLoadWarn(true);
+      } else {
+        if (!cancelled) setLoadWarn(false);
+      }
 
       try {
         // 读取文件二进制
@@ -84,6 +93,8 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
     return () => {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
+      // 释放该文件的缩略图缓存（回收内存）
+      releaseThumb(file);
     };
   }, [file]);
 
@@ -97,16 +108,23 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
       setIsPlaying(true);
     } else {
       // 暂停：生成静态首帧图盖住动画
-      file.arrayBuffer().then(async (data) => {
+      // 优先用缓存的缩略图（已解码首帧，避免重复读取十几 MB 大文件）
+      const loadPause = async () => {
         if (!file) return;
-        const buf = new Uint8Array(data);
         try {
-          const url = await generateStaticImage(buf.buffer, 1024);
-          setPauseThumb(url);
+          if (hasImageDecoder()) {
+            const url = await getCachedThumb(file, 1024);
+            setPauseThumb(url);
+          } else {
+            const buf = new Uint8Array(await file.arrayBuffer());
+            const url = await generateStaticImage(buf.buffer, 1024);
+            setPauseThumb(url);
+          }
         } catch (e) {
           console.error('[Player] 生成暂停图失败:', e);
         }
-      });
+      };
+      loadPause();
       if (img) img.style.visibility = 'hidden';
       setPaused(true);
       setIsPlaying(false);
@@ -161,6 +179,12 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
           <div className="load-error">
             <p>❌ 加载失败</p>
             <p className="err-msg">{loadError}</p>
+          </div>
+        )}
+
+        {loadWarn && !loadError && (
+          <div className="load-warn">
+            <p>⚠️ 文件较大（{formatSize(fileMeta?.size)}），如播放卡顿可尝试改用图片较小/分辨率较低的版本</p>
           </div>
         )}
 
