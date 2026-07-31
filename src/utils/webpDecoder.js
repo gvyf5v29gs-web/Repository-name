@@ -269,7 +269,8 @@ export class WebPPlayer {
     if (this._preloadCache.has(frameIndex)) {
       const frame = this._preloadCache.get(frameIndex);
       this._preloadCache.delete(frameIndex);
-      this._drawFrame(frame);
+      await this._drawFrame(frame);
+      if (frame && typeof frame.close === 'function') frame.close();
       return;
     }
 
@@ -279,8 +280,8 @@ export class WebPPlayer {
     try {
       const result = await this.decoder.decode({ frameIndex });
       this._decoding.delete(frameIndex);
-      if (result.image && result.image.displayWidth) {
-        this._drawFrame(result.image);
+      if (result.image) {
+        await this._drawFrame(result.image);
         result.image.close();
       }
     } catch (err) {
@@ -305,16 +306,36 @@ export class WebPPlayer {
     }).catch(() => {});
   }
 
-  _drawFrame(image) {
-    if (!image || !image.displayWidth) return;
-    // 使用与 canvas 同尺寸绘制（支持缩放：从原尺寸缩放到 renderWidth/Height）
+  async _drawFrame(image) {
+    if (!image) return;
+    // 兼容 VideoFrame：displayWidth 在部分 iOS 可能为 undefined，用 codedWidth 兜底
+    const sw = image.displayWidth || image.codedWidth || image.width;
+    const sh = image.displayHeight || image.codedHeight || image.height;
+    if (!sw || !sh) return;
+
+    // 优先用 createImageBitmap 提高跨浏览器兼容性；失败则直接 drawImage
+    let bitmap = null;
+    try {
+      if (typeof createImageBitmap === 'function' && image instanceof ImageBitmap === false) {
+        bitmap = await createImageBitmap(image);
+      }
+    } catch (e) {
+      bitmap = null;
+    }
+
+    const source = bitmap || image;
+    const srcW = bitmap ? bitmap.width : sw;
+    const srcH = bitmap ? bitmap.height : sh;
+
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    // 缩放绘制：若开启流畅模式或尺寸不同，则缩放绘制到画布
+    // 缩放绘制到画布（流畅模式降分辨率）
     this.ctx.drawImage(
-      image,
-      0, 0, image.displayWidth, image.displayHeight,
+      source,
+      0, 0, srcW, srcH,
       0, 0, this.canvas.width, this.canvas.height
     );
+
+    if (bitmap) bitmap.close();
   }
 
   destroy() {

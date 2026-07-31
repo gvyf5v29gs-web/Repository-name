@@ -31,7 +31,6 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
   const [isAnimation, setIsAnimation] = useState(null); // null=检测中, true/false
   const [fileMeta, setFileMeta] = useState(null);
   const [loadError, setLoadError] = useState(null);
-  const [loadWarn, setLoadWarn] = useState(false); // 大文件警告
   const [imgSrc, setImgSrc] = useState(null);    // blob URL
 
   // 释放暂停图 blob URL（避免内存泄漏）
@@ -95,13 +94,6 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
 
       // 文件信息（File 对象自带 name/size）
       if (!cancelled()) setFileMeta({ name: file.name, size: file.size });
-
-      // 大文件提示：十几 MB 的高分辨率动画 WebP 在移动端解码较重
-      if (file.size > 8 * 1024 * 1024) {
-        if (!cancelled()) setLoadWarn(true);
-      } else {
-        if (!cancelled()) setLoadWarn(false);
-      }
 
       try {
         // 读取文件二进制
@@ -256,12 +248,6 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
           <div className="load-error">
             <p>❌ 加载失败</p>
             <p className="err-msg">{loadError}</p>
-          </div>
-        )}
-
-        {loadWarn && !loadError && (
-          <div className="load-warn">
-            <p>⚠️ 文件较大（{formatSize(fileMeta?.size)}），如播放卡顿可尝试改用图片较小/分辨率较低的版本</p>
           </div>
         )}
 
