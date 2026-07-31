@@ -67,19 +67,6 @@ export class WebPPlayer {
       this.srcHeight = info.height;
       this.setScaleMode(this.scaleMode);
 
-      // 若开启降分辨率且原始尺寸明显大于渲染尺寸，重新创建低分辨率解码器（省内存/加速）
-      if (this.scaleMode && (this.renderWidth < info.width || this.renderHeight < info.height)) {
-        const old = this.decoder;
-        this.decoder = new ImageDecoder({
-          data: arrayBuffer,
-          type: 'image/webp',
-          desiredWidth: this.renderWidth,
-          desiredHeight: this.renderHeight,
-        });
-        try { await this.decoder.tracks.ready; } catch (e) { console.warn('[WebPPlayer] 低分辨率解码器创建失败，沿用原解码器', e); this.decoder = old; }
-        this.track = this.decoder.tracks.selectedTrack;
-      }
-
       // 设置 canvas 尺寸
       this.canvas.width = this.renderWidth;
       this.canvas.height = this.renderHeight;
@@ -274,20 +261,6 @@ export class WebPPlayer {
    * 解码并绘制指定帧（带预解码缓存）
    */
   async decodeAndDraw(frameIndex) {
-    // 预解码下一帧
-    if (this.frameCount > 1) {
-      this._preload(frameIndex + 1);
-    }
-
-    // 检查缓存
-    if (this._preloadCache.has(frameIndex)) {
-      const frame = this._preloadCache.get(frameIndex);
-      this._preloadCache.delete(frameIndex);
-      await this._drawFrame(frame);
-      if (frame && typeof frame.close === 'function') frame.close();
-      return;
-    }
-
     if (this._decoding.has(frameIndex)) return; // 已在解码
 
     this._decoding.add(frameIndex);
@@ -296,7 +269,7 @@ export class WebPPlayer {
       this._decoding.delete(frameIndex);
       if (result.image) {
         await this._drawFrame(result.image);
-        result.image.close();
+        if (result.image && typeof result.image.close === 'function') result.image.close();
       }
     } catch (err) {
       this._decoding.delete(frameIndex);
@@ -326,9 +299,21 @@ export class WebPPlayer {
     const sh = image.displayHeight || image.codedHeight || image.height;
     if (!sw || !sh) return;
 
-    // 方案1（首选）：createImageBitmap 转位图再缩放绘制（自动处理尺寸，跨浏览器最稳）
-    let rendered = false;
-    if (typeof createImageBitmap === 'function' && !(image instanceof ImageBitmap)) {
+    // 与缩略图(已验可用)一致：直接 drawImage(VideoFrame) 缩放绘制
+    // 先尝试 drawImage，失败再用 createImageBitmap 兜底
+    try {
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.ctx.drawImage(
+        image, 0, 0, sw, sh,
+        0, 0, this.canvas.width, this.canvas.height
+      );
+      return;
+    } catch (e) {
+      console.warn('[WebPPlayer] drawImage(VideoFrame) 失败，尝试 createImageBitmap:', e);
+    }
+
+    // 兜底：createImageBitmap
+    if (typeof createImageBitmap === 'function') {
       try {
         const bitmap = await createImageBitmap(image);
         const bw = bitmap.width;
@@ -339,23 +324,8 @@ export class WebPPlayer {
           0, 0, this.canvas.width, this.canvas.height
         );
         bitmap.close();
-        rendered = true;
-      } catch (e) {
-        rendered = false;
-        console.warn('[WebPPlayer] createImageBitmap 失败，回退 drawImage:', e);
-      }
-    }
-
-    // 方案2（回退）：直接 drawImage(VideoFrame)
-    if (!rendered) {
-      try {
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        this.ctx.drawImage(
-          image, 0, 0, sw, sh,
-          0, 0, this.canvas.width, this.canvas.height
-        );
       } catch (e2) {
-        console.error('[WebPPlayer] drawImage(VideoFrame) 失败:', e2);
+        console.error('[WebPPlayer] createImageBitmap 绘制也失败:', e2);
       }
     }
   }
