@@ -1,0 +1,297 @@
+/**
+ * WebP 动画解码播放器
+ * 基于 WebCodecs ImageDecoder，实现帧级控制：播放/暂停/倍速/逐帧/循环
+ */
+export class WebPPlayer {
+  constructor(canvas, options = {}) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d', { alpha: true });
+    this.decoder = null;
+    this.track = null;
+    this.buffer = null;
+
+    // 播放状态
+    this.isPlaying = false;
+    this.currentFrame = 0;
+    this.playbackRate = 1.0;
+    this.loop = true;
+    this.isAnimation = false;
+    this.frameCount = 0;
+    this.frameDuration = 0; // 单帧时长(ms)
+    this.repeatedTimes = 0; // 循环次数 (0 = 无限)
+    this.renderedCount = 0;
+
+    this._rafId = null;
+    this._lastTime = 0;
+    this._preloadCache = new Map(); // 预解码缓存
+    this._decoding = new Set();     // 正在解码的帧
+
+    this.onPlayStateChange = options.onPlayStateChange || null;
+    this.onFrameChange = options.onFrameChange || null;
+    this.onInfoChange = options.onInfoChange || null;
+  }
+
+  /**
+   * 加载 WebP 文件 (ArrayBuffer)
+   * 返回文件信息，成功则自动播放
+   */
+  async load(arrayBuffer) {
+    this.stop();
+    this.buffer = arrayBuffer;
+
+    try {
+      this.decoder = new ImageDecoder({ data: arrayBuffer, type: 'image/webp' });
+      await this.decoder.tracks.ready;
+      this.track = this.decoder.tracks.selectedTrack;
+
+      const info = {
+        width: this.track.displayWidth || this.track.canvasWidth,
+        height: this.track.displayHeight || this.track.canvasHeight,
+        frameCount: this.track.frameCount,
+        frameDurationMs: this.track.frameDuration ? this.track.frameDuration / 1000 : 0,
+        repeatedTimes: this.track.repeatedTimes,
+      };
+
+      this.frameCount = info.frameCount;
+      this.frameDuration = info.frameDurationMs || 100; // 默认 100ms
+      this.repeatedTimes = info.repeatedTimes;
+      this.isAnimation = info.frameCount > 1;
+      this.currentFrame = 0;
+      this.renderedCount = 0;
+
+      // 设置 canvas 尺寸
+      this.canvas.width = info.width;
+      this.canvas.height = info.height;
+
+      // 解码第一帧立即显示
+      await this.decodeAndDraw(0);
+
+      if (this.onInfoChange) this.onInfoChange(info);
+      if (this.onFrameChange) this.onFrameChange(0, info.frameCount);
+
+      // 动画则自动播放
+      if (this.isAnimation) {
+        this.play();
+      } else {
+        if (this.onPlayStateChange) this.onPlayStateChange(false, true);
+      }
+
+      return info;
+    } catch (err) {
+      console.error('[WebPPlayer] 加载失败:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * 解析静态图信息（供静态 WebP 用 <img> 显示）
+   */
+  static async probe(arrayBuffer) {
+    const decoder = new ImageDecoder({ data: arrayBuffer, type: 'image/webp' });
+    await decoder.tracks.ready;
+    const track = decoder.tracks.selectedTrack;
+    const info = {
+      width: track.displayWidth || track.canvasWidth,
+      height: track.displayHeight || track.canvasHeight,
+      frameCount: track.frameCount,
+      frameDurationMs: track.frameDuration ? track.frameDuration / 1000 : 0,
+      repeatedTimes: track.repeatedTimes,
+      isAnimation: track.frameCount > 1,
+    };
+    decoder.close();
+    return info;
+  }
+
+  /* ==================== 播放控制 ==================== */
+
+  play() {
+    if (!this.isAnimation || this.isPlaying) return;
+    this.isPlaying = true;
+    this._lastTime = 0;
+    this._renderLoop();
+    if (this.onPlayStateChange) this.onPlayStateChange(true);
+  }
+
+  pause() {
+    if (!this.isPlaying) return;
+    this.isPlaying = false;
+    cancelAnimationFrame(this._rafId);
+    this._rafId = null;
+    if (this.onPlayStateChange) this.onPlayStateChange(false);
+  }
+
+  toggle() {
+    if (this.isPlaying) this.pause();
+    else this.play();
+  }
+
+  stop() {
+    this.pause();
+    this._preloadCache.clear();
+    this._decoding.clear();
+    if (this.decoder) {
+      try { this.decoder.close(); } catch (e) {}
+      this.decoder = null;
+    }
+    this.track = null;
+    this.isAnimation = false;
+    this.currentFrame = 0;
+  }
+
+  setPlaybackRate(rate) {
+    this.playbackRate = Math.max(0.1, Math.min(4, rate));
+    if (this.isPlaying) {
+      // 重置计时基准
+      this._lastTime = 0;
+    }
+  }
+
+  setLoop(loop) {
+    this.loop = loop;
+  }
+
+  /**
+   * 逐帧跳转
+   */
+  async step(delta) {
+    this.pause();
+    const next = this.currentFrame + delta;
+    if (next < 0) {
+      this.currentFrame = this.frameCount - 1;
+    } else if (next >= this.frameCount) {
+      this.currentFrame = 0;
+    } else {
+      this.currentFrame = next;
+    }
+    await this.decodeAndDraw(this.currentFrame);
+    if (this.onFrameChange) this.onFrameChange(this.currentFrame, this.frameCount);
+  }
+
+  /**
+   * 跳转到指定帧
+   */
+  async seek(frameIndex) {
+    if (frameIndex < 0 || frameIndex >= this.frameCount) return;
+    this.pause();
+    this.currentFrame = frameIndex;
+    this.renderedCount = 0;
+    await this.decodeAndDraw(this.currentFrame);
+    if (this.onFrameChange) this.onFrameChange(this.currentFrame, this.frameCount);
+  }
+
+  /* ==================== 渲染 ==================== */
+
+  _renderLoop = () => {
+    if (!this.isPlaying) return;
+
+    this._rafId = requestAnimationFrame(this._renderLoop);
+
+    const now = performance.now();
+    if (this._lastTime === 0) {
+      this._lastTime = now;
+      return;
+    }
+
+    const elapsed = now - this._lastTime;
+    const frameInterval = this.frameDuration / this.playbackRate;
+
+    if (elapsed >= frameInterval) {
+      this._lastTime = now;
+      this._nextFrame();
+    }
+  };
+
+  _nextFrame() {
+    let next = this.currentFrame + 1;
+
+    if (next >= this.frameCount) {
+      this.renderedCount++;
+      if (this.repeatedTimes > 0 && this.renderedCount >= this.repeatedTimes) {
+        // 播放完毕，停在最后一帧
+        this.currentFrame = this.frameCount - 1;
+        this.decodeAndDraw(this.currentFrame);
+        this.pause();
+        return;
+      }
+      if (!this.loop) {
+        this.currentFrame = this.frameCount - 1;
+        this.decodeAndDraw(this.currentFrame);
+        this.pause();
+        return;
+      }
+      next = 0;
+    }
+
+    this.currentFrame = next;
+    this.decodeAndDraw(next);
+    if (this.onFrameChange) this.onFrameChange(next, this.frameCount);
+  }
+
+  /**
+   * 解码并绘制指定帧（带预解码缓存）
+   */
+  async decodeAndDraw(frameIndex) {
+    // 预解码下一帧
+    if (this.frameCount > 1) {
+      this._preload(frameIndex + 1);
+    }
+
+    // 检查缓存
+    if (this._preloadCache.has(frameIndex)) {
+      const frame = this._preloadCache.get(frameIndex);
+      this._preloadCache.delete(frameIndex);
+      this._drawFrame(frame);
+      return;
+    }
+
+    if (this._decoding.has(frameIndex)) return; // 已在解码
+
+    this._decoding.add(frameIndex);
+    try {
+      const result = await this.decoder.decode({ frameIndex });
+      this._decoding.delete(frameIndex);
+      if (result.image && result.image.displayWidth) {
+        this._drawFrame(result.image);
+        result.image.close();
+      }
+    } catch (err) {
+      this._decoding.delete(frameIndex);
+      console.error('[WebPPlayer] 解码帧失败:', frameIndex, err);
+    }
+  }
+
+  /**
+   * 预解码缓存帧（限制最多 3 帧）
+   */
+  _preload(frameIndex) {
+    if (frameIndex >= this.frameCount || this._decoding.has(frameIndex)) return;
+    if (this._preloadCache.size >= 3) return;
+
+    this.decoder.decode({ frameIndex }).then((result) => {
+      if (this._preloadCache.size >= 3) {
+        result.image.close();
+        return;
+      }
+      this._preloadCache.set(frameIndex, result.image);
+    }).catch(() => {});
+  }
+
+  _drawFrame(image) {
+    if (!image || !image.displayWidth) return;
+    // 使用与 canvas 同尺寸绘制，处理显示尺寸与实际尺寸
+    const dw = image.displayWidth;
+    const dh = image.displayHeight;
+    if (dw !== this.canvas.width || dh !== this.canvas.height) {
+      // 重置画布尺寸以匹配显示尺寸
+    }
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    // 使用 ImageBitmapRenderingContext 兼容或普通 drawImage
+    this.ctx.drawImage(image, 0, 0);
+  }
+
+  destroy() {
+    this.stop();
+    this.ctx = null;
+    this.canvas = null;
+  }
+}
