@@ -96,10 +96,11 @@ export default function App() {
         </div>
       </div>
 
-      {/* 播放主体 */}
+      {/* 播放主体：用 key 强制重建 Player，切换图片时彻底释放上一张的内存/blob URL */}
       <div className="main-area">
         {currentFile ? (
           <Player
+            key={currentFile.name}
             ref={playerRef}
             file={currentFile}
             onPrev={handlePrev}

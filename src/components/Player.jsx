@@ -20,6 +20,7 @@ import { getCachedThumb, releaseThumb } from '../utils/thumbnailGenerator';
  */
 const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
   const imgRef = useRef(null);
+  const pauseThumbUrlRef = useRef(null); // 跟踪暂停图 blob URL，便于释放
   const [isPlaying, setIsPlaying] = useState(true);
   const [paused, setPaused] = useState(false);
   const [pauseThumb, setPauseThumb] = useState(null);
@@ -30,6 +31,14 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
   const [loadWarn, setLoadWarn] = useState(false); // 大文件警告
   const [imgSrc, setImgSrc] = useState(null);    // blob URL
 
+  // 释放暂停图 blob URL（避免内存泄漏）
+  const revokePauseThumb = () => {
+    if (pauseThumbUrlRef.current) {
+      URL.revokeObjectURL(pauseThumbUrlRef.current);
+      pauseThumbUrlRef.current = null;
+    }
+  };
+
   // 加载文件（读取二进制 -> 生成 blob URL）
   useEffect(() => {
     let cancelled = false;
@@ -38,6 +47,7 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
     setInfo(null);
     setIsAnimation(null);
     setPaused(false);
+    revokePauseThumb();
     setPauseThumb(null);
     setIsPlaying(true);
     setImgSrc(null);
@@ -93,6 +103,7 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
     return () => {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
+      revokePauseThumb();
       // 释放该文件的缩略图缓存（回收内存）
       releaseThumb(file);
     };
@@ -112,14 +123,16 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
       const loadPause = async () => {
         if (!file) return;
         try {
+          revokePauseThumb(); // 先释放旧的暂停图
+          let url;
           if (hasImageDecoder()) {
-            const url = await getCachedThumb(file, 1024);
-            setPauseThumb(url);
+            url = await getCachedThumb(file, 1024);
           } else {
             const buf = new Uint8Array(await file.arrayBuffer());
-            const url = await generateStaticImage(buf.buffer, 1024);
-            setPauseThumb(url);
+            url = await generateStaticImage(buf.buffer, 1024);
           }
+          pauseThumbUrlRef.current = url;
+          setPauseThumb(url);
         } catch (e) {
           console.error('[Player] 生成暂停图失败:', e);
         }
@@ -199,6 +212,8 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
               className="player-img"
               src={imgSrc}
               alt="webp"
+              decoding="sync"
+              loading="eager"
             />
             {/* 暂停时盖一层静态首帧图 */}
             {paused && pauseThumb && (
@@ -207,6 +222,7 @@ const Player = forwardRef(function Player({ file, onPrev, onNext }, ref) {
                 className="player-img player-img-pause"
                 src={pauseThumb}
                 alt=""
+                decoding="sync"
               />
             )}
           </div>
